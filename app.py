@@ -1116,6 +1116,21 @@ def render_analyst_table(report_df: pd.DataFrame, percentile_p: int, max_rows: i
 # MAIN APP
 # =====================================================================
 st.set_page_config(page_title="Lead Time Optimization · v7", layout="wide", initial_sidebar_state="collapsed")
+
+# ---------------------------------------------------------------------
+# HTML render fix: Streamlit's st.markdown treats lines with 4+ leading
+# spaces as code blocks even with unsafe_allow_html=True. We monkey-patch
+# st.markdown to aggressively strip per-line leading whitespace from any
+# HTML body. This is safe because our HTML/CSS doesn't depend on
+# indentation, and the JS we ship is single-line.
+# ---------------------------------------------------------------------
+_orig_markdown = st.markdown
+def _patched_markdown(body, *args, **kwargs):
+    if kwargs.get("unsafe_allow_html") and isinstance(body, str):
+        body = "\n".join(line.lstrip() for line in body.split("\n")).strip()
+    return _orig_markdown(body, *args, **kwargs)
+st.markdown = _patched_markdown
+
 st.markdown(V7_CSS, unsafe_allow_html=True)
 
 # Session state init
@@ -1302,9 +1317,15 @@ if not shipment_lt.empty:
                                               "ships": int(shipment_lt[col].notna().sum()), "col": col}
 
 # Bottleneck detection
-seg_stats_list = [{"name": f"{a}-{b}", **scope_stats.get(f"{a}-{b}", {})} for a, b in SEGMENTS if f"{a}-{b}" in scope_stats]
+seg_stats_list = []
+for _a, _b in SEGMENTS:
+    _key = f"{_a}-{_b}"
+    if _key in scope_stats:
+        _item = {"segment_key": _key, "start_ms": _a, "end_ms": _b}
+        _item.update(scope_stats[_key])
+        seg_stats_list.append(_item)
 bottleneck = compute_bottleneck(seg_stats_list) if whole_journey else None
-bottleneck_key = bottleneck["name"] if bottleneck else None
+bottleneck_key = bottleneck["segment_key"] if bottleneck else None
 
 # Whole Journey card
 whole_stat = scope_stats.get("whole", {})
@@ -1355,19 +1376,21 @@ st.markdown(f"""
 
 # ---- Bottleneck callout ----
 if bottleneck and whole_journey:
-    bk = bottleneck["name"]  # like "CEP-CGI"
-    a, b = bk.split("-")
-    st.markdown(f"""
-    <div class="v7-bottleneck-callout">
-      <div class="v7-bc-icon">🚧</div>
-      <div class="v7-bc-text">
-        <h3>Bottleneck: <strong>{a} → {b}</strong> ({MILESTONE_LONG[a][0]} → {MILESTONE_LONG[b][0]})</h3>
-        <p>This segment has the highest P{percentile_p}/median ratio ({bottleneck['ratio']:.2f}×). Median {bottleneck['median_d']}d but worst 20%+ take {bottleneck['pxx_d']}d. Improving this segment alone would tighten end-to-end P{percentile_p} by ~{bottleneck['improvement_d']}d.</p>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-    if st.button("Drill into this segment →", key="drill_bottleneck"):
-        st.session_state["active_scope"] = bk; st.rerun()
+    a = bottleneck.get("start_ms")
+    b = bottleneck.get("end_ms")
+    bk = bottleneck.get("segment_key")
+    if a and b and bk:
+        st.markdown(f"""
+        <div class="v7-bottleneck-callout">
+          <div class="v7-bc-icon">🚧</div>
+          <div class="v7-bc-text">
+            <h3>Bottleneck: <strong>{a} → {b}</strong> ({MILESTONE_LONG[a][0]} → {MILESTONE_LONG[b][0]})</h3>
+            <p>This segment has the highest P{percentile_p}/median ratio ({bottleneck['ratio']:.2f}×). Median {bottleneck['median_d']}d but worst 20%+ take {bottleneck['pxx_d']}d. Improving this segment alone would tighten end-to-end P{percentile_p} by ~{bottleneck['improvement_d']}d.</p>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Drill into this segment →", key="drill_bottleneck"):
+            st.session_state["active_scope"] = bk; st.rerun()
 
 # ---- Lane Focus selector ----
 all_lanes = lane_counts["Lane"].tolist() if not lane_counts.empty else []
